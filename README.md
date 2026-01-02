@@ -1,0 +1,105 @@
+# Enterprise-Grade RAG with PGVector & Hybrid Search
+
+Grounded Retrieval-Augmented Generation (RAG) stack for financial document intelligence. It ingests highly repetitive regulatory filings, stores multi-level chunks in PostgreSQL + pgvector, and serves FastAPI endpoints for ingestion, querying, and evaluation.
+
+## Key Capabilities
+- **Hybrid Retrieval:** Dense semantic search via sentence-transformers combined with BM25 sparse retrieval, fused through Reciprocal Rank Fusion (RRF) where $\text{score}=\sum_i \frac{1}{k + r_i}$.
+- **Hierarchical Chunking:** Title, section, and paragraph-level spans retain navigational context for explainability and better recall.
+- **Table Intelligence:** Docling-powered extraction turns income statements and other financial tables into normalized CSV metadata for embeddings.
+- **LangChain Orchestration:** Retrieval hits feed a LangChain prompt (ChatGPT-compatible) that cites chunk_ids, with deterministic extractive fallbacks when no LLM credentials exist.
+- **Evaluation-Ready:** Built-in hooks for RAGAS (faithfulness, answer relevancy) plus tracking of Recall@K and groundedness.
+- **Production Foundation:** Async FastAPI, structured logging, Docker + Compose stack, and typed service boundaries for LangChain orchestration.
+
+## Project Layout
+```
+app/
+  api/            # FastAPI routers and request/response DTOs
+  core/           # Settings, logging, and dependency wiring
+  services/       # Ingestion, chunking, embeddings, retrieval, evaluation
+  utils/          # Retrieval math helpers (e.g., RRF)
+  main.py         # FastAPI entry point
+scripts/
+  init_db.py      # pgvector extension + schema bootstrap
+Dockerfile        # API container
+docker-compose.yml
+pyproject.toml    # Dependencies and tooling
+```
+
+## Prerequisites
+1. **Python 3.11+** and **pip**
+2. **Docker** (optional but recommended)
+3. **PostgreSQL 15+** with `pgvector` extension (Compose stack auto-enables it)
+4. API keys for your preferred LLM provider (e.g., `OPENAI_API_KEY`) if you plan to call external models.
+
+## Quick Start
+```bash
+# 1. Create a virtual environment
+python -m venv .venv && .venv/Scripts/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+
+# 2. Install dependencies
+pip install -e .
+
+# 3. Start PostgreSQL + API (two shells)
+docker compose up db        # database with pgvector
+python scripts/init_db.py   # ensure pgvector extension + tables
+docker compose up api       # FastAPI app served via uvicorn
+
+# 4. Run the API locally without Docker (optional)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## Configuration
+All tunables live in `.env` (see `.env.example`). Key settings:
+- `POSTGRES_DSN` / granular host + creds
+- `EMBEDDING_MODEL_NAME` default: `sentence-transformers/all-mpnet-base-v2`
+- `BM25_K1`, `BM25_B` for sparse tuning
+- `RRF_K` controls fusion aggressiveness
+- `RAG_EVALUATION_SAMPLE_SIZE` for scheduled eval batches
+
+## Workflow Overview
+1. **Ingest** (`POST /api/v1/ingest`): Submit multipart/form-data with `file` (PDF/text) and `metadata_json` (stringified JSON). Docling extracts canonical text + tables, hierarchical chunking produces title/section/paragraph/table spans, and embeddings + sparse tokens are persisted in pgvector.
+2. **Query** (`POST /api/v1/query`): Accepts a natural language question. Hybrid retriever gets dense + sparse hits, fuses them with RRF, and orchestrates an LLM answer with LangChain while attaching citations.
+3. **Evaluate** (`POST /api/v1/evaluate`): Submit gold answers to compute RAGAS metrics (faithfulness, answer relevancy) and derived KPIs such as Recall@K and groundedness.
+
+## Metrics
+- **Retrieval Recall@K:** For each labeled query, we check whether the labeled ground-truth span appears inside the top-K cited contexts.
+- **Groundedness:** Percentage of answers whose citations explicitly contain the labeled ground-truth span.
+- **User Acceptance Rate:** Track thumbs-up/thumbs-down in telemetry. Target $\geq 0.8$ mean acceptance.
+
+## Evaluation Loop
+POST labeled samples to `/api/v1/evaluate` with this payload shape:
+
+```json
+[
+  {
+    "question": "What was the Q4 revenue guidance?",
+    "answer": "Guidance is $12.5B-$13B.",
+    "ground_truth": "Revenue guidance for Q4 2024 is $12.5-$13 billion.",
+    "citations": ["Revenue guidance for Q4 2024 is $12.5-$13 billion."]
+  }
+]
+```
+
+The service streams data through RAGAS to compute faithfulness and answer relevancy, then derives groundedness and Recall@K directly from the submitted citations.
+
+## Docker Stack
+- `api`: FastAPI app served by Uvicorn.
+- `db`: PostgreSQL 16 with `pgvector` extension and tuned memory defaults.
+
+To bring everything up:
+```bash
+docker compose up --build
+```
+
+## Testing
+```bash
+pytest
+```
+
+## Next Steps
+- Connect enterprise auth (e.g., Azure AD) before production roll-out.
+- Wire in hardware-efficient distilled models (Phi-3-mini, Llama Guard) via LangChain `ChatLiteLLM`.
+- Schedule automatic Docling re-ingestion for newly published filings.
+
+## License
+MIT
